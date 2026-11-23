@@ -1044,6 +1044,31 @@
     const phraseZoomClose = document.getElementById('phrase-zoom-close');
     const phraseHintBar = document.getElementById('phrase-hint-bar');
 
+    const GEMINI_KEY_STORAGE = 'teddy_bangkok_gemini_api_key';
+
+    function getSavedGeminiApiKey() {
+      try {
+        return (localStorage.getItem(GEMINI_KEY_STORAGE) || '').trim();
+      } catch (e) {
+        return '';
+      }
+    }
+
+    function saveGeminiApiKey(key) {
+      try {
+        if (key && key.trim()) {
+          localStorage.setItem(GEMINI_KEY_STORAGE, key.trim());
+        } else {
+          localStorage.removeItem(GEMINI_KEY_STORAGE);
+        }
+      } catch (e) {}
+    }
+
+    function maskApiKey(key) {
+      if (!key || key.length < 10) return '已設定';
+      return `${key.slice(0, 6)}••••••${key.slice(-4)}`;
+    }
+
     // 暫存最近一次 AI 翻譯結果，供全螢幕放大顯示使用
     let lastAiTranslation = null;
 
@@ -1077,25 +1102,85 @@
       });
     }
 
-    // 呼叫 Netlify Function 進行泰文菜單照片 AI 辨識（安全隱藏 API Key，含重試機制）
+    // 呼叫 Gemini AI 視覺理解解讀泰文菜單照片（讀取本機儲存的 API Key，含指數退避重試）
     async function analyzeMenuPhotoWithAI(base64Data, mimeType) {
+      const apiKey = getSavedGeminiApiKey();
+      if (!apiKey) {
+        throw new Error('尚未設定 Gemini API Key，請先在上方金鑰欄位貼上並儲存！');
+      }
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+      const systemPrompt = `你是陪同台灣家庭（包含50幾歲父母）在泰國曼谷旅遊的資深美食導遊。
+請仔細辨識這張泰國餐廳菜單照片中的菜色，並以結構化 JSON 回傳，幫助長輩快速看懂每一道菜是什麼、會不會辣、以及推薦點哪些菜：
+1. "parentTips": 一句貼心提醒，挑出菜單上最適合50幾歲爸媽、不辣又好入口的招牌菜色（若整張都不是菜單則禮貌說明）。
+2. "dishes": 菜單上辨識出的主要菜色陣列（最多列出 12 道最重要的菜），每道菜包含：
+   - "zhName": 台灣人一看就懂的道地中文菜名（不要死板直譯，要翻出實際料理名稱）
+   - "thName": 菜單上的泰文或英文原名
+   - "price": 菜單上的價格（例如 "180 ฿"，若無標示則填 "未標價"）
+   - "spicyLevel": 辣度預測，只能填 "不辣"、"微辣" 或 "會辣"
+   - "ingredients": 主要食材與口感簡述（例如：鮮蝦、豬肉、椰奶、炸物、生食提醒等，15字以內）
+   - "parentFriendly": 布林值 true/false（是否適合長輩或可客製不辣）`;
+
+      const payload = {
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: "請幫我解讀這張泰文菜單照片，翻成台灣人看得懂的菜名、標出辣度與食材，並推薦適合爸媽的菜色。" },
+              {
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Data
+                }
+              }
+            ]
+          }
+        ],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              parentTips: { type: "STRING" },
+              dishes: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    zhName: { type: "STRING" },
+                    thName: { type: "STRING" },
+                    price: { type: "STRING" },
+                    spicyLevel: { type: "STRING" },
+                    ingredients: { type: "STRING" },
+                    parentFriendly: { type: "BOOLEAN" }
+                  },
+                  required: ["zhName", "thName", "price", "spicyLevel", "ingredients", "parentFriendly"]
+                }
+              }
+            },
+            required: ["parentTips", "dishes"]
+          }
+        }
+      };
+
       const delays = [1000, 2000, 4000];
       for (let attempt = 0; attempt <= delays.length; attempt++) {
         try {
-          const response = await fetch('/api/ai-translate', {
+          const response = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mode: 'menu',
-              base64Data: base64Data,
-              mimeType: mimeType
-            })
+            body: JSON.stringify(payload)
           });
           if (!response.ok) {
-            const errBody = await response.text();
-            throw new Error(`HTTP ${response.status}: ${errBody}`);
+            const errJson = await response.json().catch(() => ({}));
+            const detail = errJson?.error?.message || `HTTP ${response.status}`;
+            throw new Error(detail);
           }
-          return await response.json();
+          const data = await response.json();
+          const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!rawText) throw new Error('Empty AI menu response');
+          return JSON.parse(rawText);
         } catch (err) {
           if (attempt === delays.length) throw err;
           await new Promise(res => setTimeout(res, delays[attempt]));
@@ -1111,24 +1196,55 @@
       phraseZoomOverlay.classList.remove('hidden');
     };
 
-    // 呼叫 Netlify Function 進行中泰雙向旅遊即時翻譯（安全隱藏 API Key，含重試機制）
+    // 呼叫 Gemini API 進行中泰雙向旅遊即時翻譯（讀取本機儲存的 API Key，含指數退避重試）
     async function translateWithGeminiAI(inputText) {
+      const apiKey = getSavedGeminiApiKey();
+      if (!apiKey) {
+        throw new Error('尚未設定 Gemini API Key，請先在上方金鑰欄位貼上並儲存！');
+      }
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+      const systemPrompt = `你是專業且貼心的泰國曼谷旅遊隨身口譯員，協助台灣旅客與50多歲父母在泰國溝通。
+請將使用者輸入的「繁體中文」翻譯成「自然、禮貌、當地店員或司機一看就懂的泰文（附帶ครับ/ค่ะ禮貌語尾）」，或若使用者輸入泰文/英文則翻成繁體中文。
+請務必以 JSON 格式回傳，包含三個欄位：
+- "zh": 清楚的繁體中文原意或整理後的中文句子
+- "th": 道地禮貌的泰文翻譯（字體清晰易讀）
+- "pronounce": 給台灣人看的中文諧音發音提示與簡短使用說明`;
+
+      const payload = {
+        contents: [{ parts: [{ text: `請翻譯這句話：${inputText}` }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              zh: { type: "STRING" },
+              th: { type: "STRING" },
+              pronounce: { type: "STRING" }
+            },
+            required: ["zh", "th", "pronounce"]
+          }
+        }
+      };
+
       const delays = [1000, 2000, 4000];
       for (let attempt = 0; attempt <= delays.length; attempt++) {
         try {
-          const response = await fetch('/api/ai-translate', {
+          const response = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mode: 'text',
-              text: inputText
-            })
+            body: JSON.stringify(payload)
           });
           if (!response.ok) {
-            const errBody = await response.text();
-            throw new Error(`HTTP ${response.status}: ${errBody}`);
+            const errJson = await response.json().catch(() => ({}));
+            const detail = errJson?.error?.message || `HTTP ${response.status}`;
+            throw new Error(detail);
           }
-          return await response.json();
+          const data = await response.json();
+          const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!rawText) throw new Error('Empty AI response');
+          return JSON.parse(rawText);
         } catch (err) {
           if (attempt === delays.length) throw err;
           await new Promise(res => setTimeout(res, delays[attempt]));
@@ -1142,8 +1258,40 @@
         <span>支援 <strong>📸 拍照看懂泰文菜單</strong> 與 <strong>AI 即時翻泰文</strong>，點餐溝通零失誤！</span>
       `;
 
+      const existingKey = getSavedGeminiApiKey();
       phraseCardsList.innerHTML = `
         <div class="space-y-4">
+          <!-- 🔑 Gemini API Key 本機設定區（安全儲存在手機瀏覽器，不上傳雲端） -->
+          <div id="api-key-card" class="p-3.5 rounded-2xl bg-obsidian border ${existingKey ? 'border-emerald-500/45' : 'border-royalGold/70'} space-y-2.5 shadow-inner">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <i class="fa-solid fa-key ${existingKey ? 'text-emerald-400' : 'text-royalGold'} text-xs"></i>
+                <span id="api-key-status-text" class="text-xs font-bold ${existingKey ? 'text-emerald-300' : 'text-champagneGold'}">
+                  ${existingKey ? `✅ 已綁定 API Key（${maskApiKey(existingKey)}）` : '🔑 首次使用請先貼上 Gemini API Key'}
+                </span>
+              </div>
+              <button type="button" id="api-key-toggle-edit"
+                      class="text-[11px] px-2.5 py-1 rounded-lg bg-obsidianElevated border border-royalGold/40 text-champagneGold hover:border-champagneGold transition">
+                ${existingKey ? '更換金鑰' : '收合'}
+              </button>
+            </div>
+
+            <div id="api-key-input-box" class="${existingKey ? 'hidden' : ''} space-y-2 pt-1">
+              <div class="flex gap-2">
+                <input type="password" id="gemini-api-key-input" value="${existingKey}"
+                       placeholder="請貼上 AIza... 開頭的 Gemini API Key"
+                       class="flex-1 px-3 py-2 rounded-xl bg-obsidianCard border border-royalGold/40 focus:border-royalGold outline-none text-xs text-white placeholder-stone-500" />
+                <button type="button" id="gemini-api-key-save"
+                        class="px-3.5 py-2 rounded-xl bg-royalGold text-obsidian font-bold text-xs hover:brightness-110 active:scale-95 transition shrink-0">
+                  儲存金鑰
+                </button>
+              </div>
+              <p class="text-[10px] text-stone-400 leading-relaxed">
+                金鑰僅儲存在此手機瀏覽器（localStorage），下次開啟免重複輸入。
+              </p>
+            </div>
+          </div>
+
           <!-- 📸 AI 菜單神隊友（拍照解讀泰文菜單＋辣度與長輩推薦） -->
           <div class="p-4 rounded-2xl bg-gradient-to-br from-thaiEmerald/75 via-obsidian to-obsidian border border-royalGold/55 space-y-3 shadow-lg">
             <div class="flex items-center justify-between">
@@ -1219,6 +1367,36 @@
           </div>
         </div>
       `;
+
+      // 綁定 Gemini API Key 設定與本機儲存事件
+      const apiKeyCard = document.getElementById('api-key-card');
+      const apiKeyStatusText = document.getElementById('api-key-status-text');
+      const apiKeyToggleEdit = document.getElementById('api-key-toggle-edit');
+      const apiKeyInputBox = document.getElementById('api-key-input-box');
+      const apiKeyInput = document.getElementById('gemini-api-key-input');
+      const apiKeySaveBtn = document.getElementById('gemini-api-key-save');
+
+      apiKeyToggleEdit.addEventListener('click', () => {
+        const isHidden = apiKeyInputBox.classList.toggle('hidden');
+        apiKeyToggleEdit.textContent = isHidden ? (getSavedGeminiApiKey() ? '更換金鑰' : '設定金鑰') : '收合';
+      });
+
+      apiKeySaveBtn.addEventListener('click', () => {
+        const val = apiKeyInput.value.trim();
+        saveGeminiApiKey(val);
+        if (val) {
+          apiKeyCard.className = 'p-3.5 rounded-2xl bg-obsidian border border-emerald-500/45 space-y-2.5 shadow-inner';
+          apiKeyStatusText.className = 'text-xs font-bold text-emerald-300';
+          apiKeyStatusText.textContent = `✅ 已綁定 API Key（${maskApiKey(val)}）`;
+          apiKeyInputBox.classList.add('hidden');
+          apiKeyToggleEdit.textContent = '更換金鑰';
+        } else {
+          apiKeyCard.className = 'p-3.5 rounded-2xl bg-obsidian border border-royalGold/70 space-y-2.5 shadow-inner';
+          apiKeyStatusText.className = 'text-xs font-bold text-champagneGold';
+          apiKeyStatusText.textContent = '🔑 首次使用請先貼上 Gemini API Key';
+          apiKeyToggleEdit.textContent = '收合';
+        }
+      });
 
       // 綁定「AI 拍照看懂泰文菜單」事件
       const menuPhotoInput = document.getElementById('menu-photo-input');
@@ -1310,9 +1488,11 @@
             }).join('');
           }
         } catch (err) {
+          const errMsg = err?.message || '未知錯誤';
           menuAiStatus.innerHTML = `
             <div class="p-3 rounded-xl bg-obsidian border border-lotusRose/50 text-xs text-lotusRose space-y-1">
-              <p class="font-bold">照片辨識連線忙碌，請再試一次或切換較清晰的角度拍攝。</p>
+              <p class="font-bold">照片辨識失敗，請確認 API Key 或稍後再試：</p>
+              <p class="text-[11px] text-stone-400 break-all">原因：${errMsg}</p>
             </div>
           `;
         } finally {
@@ -1378,10 +1558,11 @@
           `;
         } catch (err) {
           const encoded = encodeURIComponent(text);
+          const errMsg = err?.message || '連線忙碌';
           aiResultBox.classList.remove('hidden');
           aiResultBox.innerHTML = `
             <div class="p-4 rounded-2xl bg-obsidian border border-lotusRose/50 space-y-2.5">
-              <p class="text-xs text-lotusRose font-semibold">目前網路連線較忙，已為您準備好一鍵開啟 Google 翻譯：</p>
+              <p class="text-xs text-lotusRose font-semibold">AI 翻譯暫時無法使用（${errMsg}），已為您準備好一鍵開啟 Google 翻譯：</p>
               <a href="https://translate.google.com/?sl=zh-TW&tl=th&text=${encoded}&op=translate" target="_blank" rel="noopener noreferrer"
                  class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-royalGold text-obsidian font-bold text-xs">
                 <span>前往 Google 翻譯查看泰文</span>
