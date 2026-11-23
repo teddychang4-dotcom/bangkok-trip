@@ -1054,7 +1054,7 @@
       if (!apiKey) {
         throw new Error('尚未設定 Gemini API Key，請先在上方金鑰欄位貼上並儲存！');
       }
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${apiKey}`;
 
       const systemPrompt = `你是陪同台灣家庭（包含50幾歲父母）在泰國曼谷旅遊的資深美食導遊。
 請仔細辨識這張泰國餐廳菜單照片中的菜色，並以結構化 JSON 回傳，幫助長輩快速看懂每一道菜是什麼、會不會辣、以及推薦點哪些菜：
@@ -1146,7 +1146,7 @@
       if (!apiKey) {
         throw new Error('尚未設定 Gemini API Key，請先在上方金鑰欄位貼上並儲存！');
       }
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${apiKey}`;
 
       const systemPrompt = `你是專業且貼心的泰國曼谷旅遊隨身口譯員，協助台灣旅客與50多歲父母在泰國溝通。
 請將使用者輸入的「繁體中文」翻譯成「自然、禮貌、當地店員或司機一看就懂的泰文（附帶ครับ/ค่ะ禮貌語尾）」，或若使用者輸入泰文/英文則翻成繁體中文。
